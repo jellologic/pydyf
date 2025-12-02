@@ -2,6 +2,50 @@ Changelog
 =========
 
 
+Version 0.12.0
+--------------
+
+Released on 2025-12-02.
+
+Dependencies:
+
+* Python 3.13 and 3.14 are supported and tested
+* Python 3.10+ is now needed, Python 3.8 and 3.9 are not supported anymore
+
+New features:
+
+* Remove deprecated color_space, shading, text_matrix and transform methods
+* Don’t add Info key in trailer when info dict is empty
+
+Contributors:
+
+* Guillaume Ayoub
+
+Backers and sponsors:
+
+* Spacinov
+* Syslifters
+* Kobalt
+* Simon Sapin
+* Grip Angebotssoftware
+* Manuel Barkhau
+* Simonsoft
+* KontextWork
+* Menutech
+* TrainingSparkle
+* Healthchecks.io
+* Method B
+* FieldHub
+* Hammerbacher
+* Yanal-Yves Fargialla
+* Morntag
+* Piloterr
+* Xavid
+* Charlie S.
+* Prothesis Dental Solutions
+* Kai DeLorenzo
+
+
 Version 0.11.0
 --------------
 
