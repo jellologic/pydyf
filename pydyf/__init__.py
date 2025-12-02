@@ -532,6 +532,10 @@ class PDF:
         if identifier not in (False, True, None):
             identifier = _to_bytes(identifier)
 
+        # Add info object if needed
+        if self.info:
+            self.add_object(self.info)
+
         # Write header
         self.write_line(b'%PDF-' + version, output)
         self.write_line(b'%\xf0\x9f\x96\xa4', output)
@@ -595,8 +599,9 @@ class PDF:
                 'W': Array(xref_lengths),
                 'Size': len(self.objects) + 1,
                 'Root': self.catalog.reference,
-                'Info': self.info.reference,
             }
+            if self.info:
+                extra['Info'] = self.info.reference
             if identifier:
                 data = b''.join(obj.data for obj in self.objects if obj.free != 'f')
                 data_hash = md5(data).hexdigest().encode()
@@ -630,7 +635,6 @@ class PDF:
             self.write_line(f'/Size {len(self.objects)}'.encode(), output)
             self.write_line(b'/Root ' + self.catalog.reference, output)
             if self.info:
-                self.add_object(self.info)
                 self.write_line(b'/Info ' + self.info.reference, output)
             if identifier:
                 data = b''.join(
