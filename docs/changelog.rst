@@ -2,6 +2,44 @@ Changelog
 =========
 
 
+Version 0.12.1
+--------------
+
+Released on 2025-12-02.
+
+Bug fixes:
+
+* Don’t add /Info key in compressed trailer if info dict is empty
+
+Contributors:
+
+* Guillaume Ayoub
+
+Backers and sponsors:
+
+* Spacinov
+* Syslifters
+* Kobalt
+* Simon Sapin
+* Grip Angebotssoftware
+* Manuel Barkhau
+* Simonsoft
+* KontextWork
+* Menutech
+* TrainingSparkle
+* Healthchecks.io
+* Method B
+* FieldHub
+* Hammerbacher
+* Yanal-Yves Fargialla
+* Morntag
+* Piloterr
+* Xavid
+* Charlie S.
+* Prothesis Dental Solutions
+* Kai DeLorenzo
+
+
 Version 0.12.0
 --------------
 
