@@ -27,12 +27,12 @@ PIXELS_BY_CHAR = dict(
 )
 
 
-def assert_pixels(document, reference_pixels):
+def assert_pixels(document, reference_pixels, compress=False):
     """Test that the rendered document matches the reference pixels."""
 
     # Transform the PDF document into a list of RGB tuples
     pdf = io.BytesIO()
-    document.write(pdf)
+    document.write(pdf, compress=compress)
     command = [
         'gs', '-q', '-dNOPAUSE', '-dSAFER', '-sDEVICE=png16m',
         '-r576', '-dDownScaleFactor=8', '-sOutputFile=-', '-']
