@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from subprocess import PIPE, run
 
+import pytest
 from PIL import Image
 
 PIXELS_BY_CHAR = dict(
@@ -66,7 +67,7 @@ def assert_pixels(document, reference_pixels, compress=False):
                     pixel or (255, 255, 255) for pixel in reference_pixels]
                 write_png(f'{name}-reference', reference_pixels, width, height)
                 x, y = i % width, i // width
-                assert 0, (
+                pytest.fail(
                     f'Pixel ({x}, {y}) in {name}: '
                     f'reference rgba{reference}, got rgba{value}')
 

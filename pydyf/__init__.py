@@ -54,7 +54,7 @@ class Object:
     @property
     def data(self):
         """Data contained in the object. Shall be defined in each subclass."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @property
     def compressible(self):
