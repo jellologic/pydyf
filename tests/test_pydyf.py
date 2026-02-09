@@ -8,7 +8,7 @@ import pydyf
 from . import assert_pixels
 
 
-@pytest.mark.parametrize("compress", [False, True])
+@pytest.mark.parametrize('compress', [False, True])
 def test_fill(compress):
     document = pydyf.PDF()
 
@@ -708,7 +708,7 @@ def test_text():
     ''')
 
 
-@pytest.mark.parametrize("compress", [False, True])
+@pytest.mark.parametrize('compress', [False, True])
 def test_no_identifier(compress):
     document = pydyf.PDF()
     pdf = io.BytesIO()
@@ -719,7 +719,7 @@ def test_no_identifier(compress):
     ) is None
 
 
-@pytest.mark.parametrize("compress", [False, True])
+@pytest.mark.parametrize('compress', [False, True])
 def test_default_identifier(compress):
     document = pydyf.PDF()
     pdf = io.BytesIO()
@@ -730,7 +730,7 @@ def test_default_identifier(compress):
     ) is not None
 
 
-@pytest.mark.parametrize("compress", [False, True])
+@pytest.mark.parametrize('compress', [False, True])
 def test_custom_identifier(compress):
     document = pydyf.PDF()
     pdf = io.BytesIO()
