@@ -39,7 +39,7 @@ def assert_pixels(document, reference_pixels, compress=False):
         '-r576', '-dDownScaleFactor=8', '-sOutputFile=-', '-']
     png = run(command, input=pdf.getvalue(), stdout=PIPE).stdout
     image = Image.open(io.BytesIO(png))
-    pixels = image.getdata()
+    pixels = image.get_flattened_data()
 
     # Transform reference drawings into a list of RGB tuples
     lines = tuple(

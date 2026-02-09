@@ -39,7 +39,7 @@ Donation = 'https://opencollective.com/courtbouillon'
 
 [project.optional-dependencies]
 doc = ['sphinx', 'furo']
-test = ['pytest', 'ruff', 'pillow']
+test = ['pytest', 'ruff', 'pillow >=12.1.0']
 
 [tool.flit.sdist]
 exclude = ['.*']
