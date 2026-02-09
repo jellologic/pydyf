@@ -1,12 +1,15 @@
 import io
 import re
 
+import pytest
+
 import pydyf
 
 from . import assert_pixels
 
 
-def test_fill():
+@pytest.mark.parametrize("compress", [False, True])
+def test_fill(compress):
     document = pydyf.PDF()
 
     draw = pydyf.Stream()
@@ -32,7 +35,7 @@ def test_fill():
         __KKKKK___
         __________
         __________
-    ''')
+    ''', compress)
 
 
 def test_stroke():
@@ -705,30 +708,33 @@ def test_text():
     ''')
 
 
-def test_no_identifier():
+@pytest.mark.parametrize("compress", [False, True])
+def test_no_identifier(compress):
     document = pydyf.PDF()
     pdf = io.BytesIO()
-    document.write(pdf, identifier=False)
+    document.write(pdf, compress=compress, identifier=False)
     assert re.search(
         b'/ID \\[\\((?P<hash>[0-9a-f]{32})\\) \\((?P=hash)\\)\\]',
         pdf.getvalue()
     ) is None
 
 
-def test_default_identifier():
+@pytest.mark.parametrize("compress", [False, True])
+def test_default_identifier(compress):
     document = pydyf.PDF()
     pdf = io.BytesIO()
-    document.write(pdf, identifier=True)
+    document.write(pdf, compress=compress, identifier=True)
     assert re.search(
         b'/ID \\[\\((?P<hash>[0-9a-f]{32})\\) \\((?P=hash)\\)\\]',
         pdf.getvalue()
     ) is not None
 
 
-def test_custom_identifier():
+@pytest.mark.parametrize("compress", [False, True])
+def test_custom_identifier(compress):
     document = pydyf.PDF()
     pdf = io.BytesIO()
-    document.write(pdf, identifier=b'abc')
+    document.write(pdf, compress=compress, identifier=b'abc')
     assert re.search(
         b'/ID \\[\\(abc\\) \\(([0-9a-f]{32})\\)\\]',
         pdf.getvalue()
