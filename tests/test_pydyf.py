@@ -812,3 +812,30 @@ def test_encryption_key_derivation():
     for _ in range(50):
         key = md5(key[:16]).digest()
     assert key[:16] == encryption.key
+
+
+def test_aes_block_vector():
+    # FIPS-197 known-answer test for the AES-128 block cipher.
+    key = bytes.fromhex('000102030405060708090a0b0c0d0e0f')
+    plaintext = bytes.fromhex('00112233445566778899aabbccddeeff')
+    expected = bytes.fromhex('69c4e0d86a7b0430d8cdb78070b4c55a')
+    cipher = pydyf._aes_encrypt_block(plaintext, pydyf._aes_expand_key(key))
+    assert cipher == expected
+
+
+def test_aes_encryption_structure():
+    data = _build_encrypted()[0]  # default rc4
+    assert b'/AESV2' not in data
+    document = pydyf.PDF()
+    content = pydyf.Stream([b'BT 10 100 Td (AesContent) Tj ET'])
+    document.add_object(content)
+    document.add_page(pydyf.Dictionary({
+        'Type': '/Page', 'Parent': document.pages.reference,
+        'MediaBox': pydyf.Array([0, 0, 200, 200]),
+        'Contents': content.reference}))
+    output = io.BytesIO()
+    document.write(output, encryption=pydyf.Encryption(method='aes'))
+    aes = output.getvalue()
+    assert b'/AESV2' in aes
+    assert b'/V 4' in aes
+    assert b'/StmF /StdCF' in aes

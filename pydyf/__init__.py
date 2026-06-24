@@ -4,6 +4,7 @@ A low-level PDF generator.
 """
 
 import base64
+import os
 import re
 import zlib
 from codecs import BOM_UTF16_BE
@@ -487,6 +488,82 @@ def _pad_password(password):
     return (password + _PASSWORD_PADDING)[:32]
 
 
+# Pure-Python AES-128 (used for the AESV2 PDF security handler). Dependency-free
+# to match the RC4 handler; AES is opt-in.
+_AES_SBOX = bytes.fromhex(
+    '637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0'
+    'b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275'
+    '09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf'
+    'd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2'
+    'cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb'
+    'e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08'
+    'ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e'
+    'e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16')
+
+
+def _aes_expand_key(key):
+    rcon = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36]
+    words = [list(key[i * 4:i * 4 + 4]) for i in range(4)]
+    for i in range(4, 44):
+        temp = list(words[i - 1])
+        if i % 4 == 0:
+            temp = temp[1:] + temp[:1]
+            temp = [_AES_SBOX[b] for b in temp]
+            temp[0] ^= rcon[i // 4 - 1]
+        words.append([a ^ b for a, b in zip(words[i - 4], temp)])
+    return words
+
+
+def _aes_xtime(a):
+    a <<= 1
+    return (a ^ 0x11B) & 0xFF if a & 0x100 else a
+
+
+def _aes_encrypt_block(block, round_keys):
+    state = list(block)
+
+    def add_round_key(rnd):
+        for i in range(16):
+            state[i] ^= round_keys[rnd * 4 + i // 4][i % 4]
+
+    add_round_key(0)
+    for rnd in range(1, 11):
+        state = [_AES_SBOX[b] for b in state]
+        # ShiftRows (column-major state).
+        state = [
+            state[0], state[5], state[10], state[15],
+            state[4], state[9], state[14], state[3],
+            state[8], state[13], state[2], state[7],
+            state[12], state[1], state[6], state[11]]
+        if rnd != 10:
+            new = []
+            for c in range(4):
+                a = state[c * 4:c * 4 + 4]
+                new += [
+                    _aes_xtime(a[0]) ^ (_aes_xtime(a[1]) ^ a[1]) ^ a[2] ^ a[3],
+                    a[0] ^ _aes_xtime(a[1]) ^ (_aes_xtime(a[2]) ^ a[2]) ^ a[3],
+                    a[0] ^ a[1] ^ _aes_xtime(a[2]) ^ (_aes_xtime(a[3]) ^ a[3]),
+                    (_aes_xtime(a[0]) ^ a[0]) ^ a[1] ^ a[2] ^ _aes_xtime(a[3])]
+            state = new
+        add_round_key(rnd)
+    return bytes(state)
+
+
+def _aes_cbc_encrypt(key, iv, data):
+    # PKCS#7 padding.
+    pad = 16 - (len(data) % 16)
+    data += bytes([pad]) * pad
+    round_keys = _aes_expand_key(key)
+    out = bytearray()
+    previous = iv
+    for offset in range(0, len(data), 16):
+        block = bytes(
+            b ^ p for b, p in zip(data[offset:offset + 16], previous))
+        previous = _aes_encrypt_block(block, round_keys)
+        out += previous
+    return bytes(out)
+
+
 class Encryption:
     """PDF standard security handler (RC4, 128-bit, revision 3).
 
@@ -498,8 +575,11 @@ class Encryption:
     :param str owner_password: password granting full permissions.
     :param str user_password: password required to open the document.
     :param int permissions: PDF permission bits (a signed 32-bit integer).
+    :param str method: ``'rc4'`` (default, 128-bit RC4, V2/R3) or ``'aes'``
+        (128-bit AES-CBC, V4/R4, AESV2).
     """
-    def __init__(self, owner_password='', user_password='', permissions=-4):
+    def __init__(self, owner_password='', user_password='', permissions=-4,
+                 method='rc4'):
         self.owner_password = owner_password
         self.user_password = user_password
         # Force the two reserved high bits required by the spec to 1, keep it a
@@ -510,8 +590,13 @@ class Encryption:
             permissions -= 0x100000000
         self.permissions = permissions
         self.key_length = 16  # 128-bit
-        self.revision = 3
-        self.version = 2
+        self.aes = method.lower() in ('aes', 'aes-128', 'aesv2')
+        if self.aes:
+            self.revision = 4
+            self.version = 4
+        else:
+            self.revision = 3
+            self.version = 2
 
     def setup(self, id_value):
         """Derive O, U and the file key from the document ID (Algorithms 2-5)."""
@@ -547,15 +632,22 @@ class Encryption:
         self.user_entry = user + b'\x00' * 16
 
     def object_key(self, number, generation):
-        """Per-object RC4 key (Algorithm 1)."""
+        """Per-object key (Algorithm 1); AES appends the 'sAlT' suffix."""
         digest = md5()
         digest.update(self.key)
         digest.update(number.to_bytes(4, 'little')[:3])
         digest.update(generation.to_bytes(4, 'little')[:2])
+        if self.aes:
+            digest.update(b'sAlT')
         return digest.digest()[:min(self.key_length + 5, 16)]
 
     def encrypt(self, number, generation, data):
-        return _rc4(self.object_key(number, generation), data)
+        key = self.object_key(number, generation)
+        if self.aes:
+            # AES-CBC with a random IV prepended to the ciphertext.
+            iv = os.urandom(16)
+            return iv + _aes_cbc_encrypt(key, iv, data)
+        return _rc4(key, data)
 
     def dictionary(self):
         """The /Encrypt dictionary (never itself encrypted)."""
@@ -571,6 +663,17 @@ class Encryption:
             'U': b'<' + self.user_entry.hex().encode() + b'>',
             'P': self.permissions,
         })
+        if self.aes:
+            # Crypt filter declaring AESV2 for both strings and streams.
+            encrypt['CF'] = Dictionary({
+                'StdCF': Dictionary({
+                    'CFM': '/AESV2',
+                    'AuthEvent': '/DocOpen',
+                    'Length': self.key_length,
+                }),
+            })
+            encrypt['StmF'] = '/StdCF'
+            encrypt['StrF'] = '/StdCF'
         encrypt.encryptable = False
         return encrypt
 
