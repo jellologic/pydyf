@@ -755,3 +755,60 @@ def test_string_encoding():
     assert pydyf.String('\\abc').data == b'(\\\\abc)'
     assert pydyf.String('abc(').data == b'(abc\\()'
     assert pydyf.String('ab)c').data == b'(ab\\)c)'
+
+
+def _build_encrypted(user_password='', owner_password='owner', permissions=-4):
+    document = pydyf.PDF()
+    content = pydyf.Stream([b'BT 10 100 Td (SecretContent) Tj ET'])
+    document.add_object(content)
+    document.add_page(pydyf.Dictionary({
+        'Type': '/Page',
+        'Parent': document.pages.reference,
+        'MediaBox': pydyf.Array([0, 0, 200, 200]),
+        'Contents': content.reference,
+    }))
+    document.info['Title'] = pydyf.String('Secret Title')
+    output = io.BytesIO()
+    encryption = pydyf.Encryption(
+        owner_password=owner_password, user_password=user_password,
+        permissions=permissions)
+    document.write(output, encryption=encryption)
+    return output.getvalue(), encryption, content
+
+
+def test_encryption_structure():
+    data, encryption, _ = _build_encrypted()
+    assert b'/Encrypt' in data
+    assert b'/Filter /Standard' in data
+    assert b'/ID [' in data
+    # O and U are 32 bytes, the file key is 16 bytes (128-bit, revision 3).
+    assert len(encryption.owner_entry) == 32
+    assert len(encryption.user_entry) == 32
+    assert len(encryption.key) == 16
+
+
+def test_encryption_roundtrip():
+    # An empty user password must let the document open, and the per-object key
+    # must decrypt the content stream back to its plaintext.
+    data, encryption, content = _build_encrypted(user_password='')
+    object_key = encryption.object_key(content.number, content.generation)
+    match = re.search(
+        rb'%d 0 obj.*?stream\n(.*?)\nendstream' % content.number, data, re.S)
+    decrypted = pydyf._rc4(object_key, match.group(1))
+    assert b'SecretContent' in decrypted
+
+
+def test_encryption_key_derivation():
+    # Re-deriving the file key from the (empty) user password and the stored
+    # O/P/ID must reproduce the encryption key (Algorithm 2).
+    from hashlib import md5
+    _, encryption, _ = _build_encrypted(user_password='')
+    digest = md5()
+    digest.update(pydyf._pad_password(''))
+    digest.update(encryption.owner_entry)
+    digest.update(encryption.permissions.to_bytes(4, 'little', signed=True))
+    digest.update(encryption.id)
+    key = digest.digest()
+    for _ in range(50):
+        key = md5(key[:16]).digest()
+    assert key[:16] == encryption.key

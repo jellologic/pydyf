@@ -7,6 +7,7 @@ import base64
 import re
 import zlib
 from codecs import BOM_UTF16_BE
+from functools import partial
 from hashlib import md5
 from math import ceil, log
 
@@ -408,6 +409,8 @@ class Stream(Object):
             compressobj = zlib.compressobj(level=9)
             stream = compressobj.compress(stream)
             stream += compressobj.flush()
+        if _encryption_context is not None:
+            stream = _encryption_context(stream)
         extra['Length'] = len(stream)
         return b'\n'.join((extra.data, b'stream', stream, b'endstream'))
 
@@ -422,15 +425,22 @@ class String(Object):
     @property
     def data(self):
         try:
-            # "A literal string is written as an arbitrary number of characters
-            # enclosed in parentheses. Any characters may appear in a string
-            # except unbalanced parentheses and the backslash, which must be
-            # treated specially."
-            escaped = re.sub(rb'([\\\(\)])', rb'\\\1', _to_bytes(self.string))
-            return b'(' + escaped + b')'
+            raw = _to_bytes(self.string)
+            utf16 = False
         except UnicodeEncodeError:
-            encoded = BOM_UTF16_BE + str(self.string).encode('utf-16-be')
-            return b'<' + encoded.hex().encode() + b'>'
+            raw = BOM_UTF16_BE + str(self.string).encode('utf-16-be')
+            utf16 = True
+        if _encryption_context is not None:
+            # Encrypted strings are written as binary, so use hexadecimal form.
+            return b'<' + _encryption_context(raw).hex().encode() + b'>'
+        if utf16:
+            return b'<' + raw.hex().encode() + b'>'
+        # "A literal string is written as an arbitrary number of characters
+        # enclosed in parentheses. Any characters may appear in a string except
+        # unbalanced parentheses and the backslash, which must be treated
+        # specially."
+        escaped = re.sub(rb'([\\\(\)])', rb'\\\1', raw)
+        return b'(' + escaped + b')'
 
 
 class Array(Object, list):
@@ -442,6 +452,132 @@ class Array(Object, list):
     @property
     def data(self):
         return b'[' + b' '.join(_to_bytes(child) for child in self) + b']'
+
+
+# --- PDF standard security handler (encryption) -----------------------------
+
+#: Standard 32-byte password padding string (PDF 32000-1:2008, Algorithm 2).
+_PASSWORD_PADDING = bytes((
+    0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56,
+    0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80,
+    0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A))
+
+
+def _rc4(key, data):
+    """Encrypt/decrypt ``data`` with RC4 (symmetric)."""
+    box = list(range(256))
+    key_length = len(key)
+    j = 0
+    for i in range(256):
+        j = (j + box[i] + key[i % key_length]) & 0xFF
+        box[i], box[j] = box[j], box[i]
+    out = bytearray(len(data))
+    i = j = 0
+    for index, byte in enumerate(data):
+        i = (i + 1) & 0xFF
+        j = (j + box[i]) & 0xFF
+        box[i], box[j] = box[j], box[i]
+        out[index] = byte ^ box[(box[i] + box[j]) & 0xFF]
+    return bytes(out)
+
+
+def _pad_password(password):
+    if isinstance(password, str):
+        password = password.encode('latin-1', 'replace')
+    return (password + _PASSWORD_PADDING)[:32]
+
+
+class Encryption:
+    """PDF standard security handler (RC4, 128-bit, revision 3).
+
+    Encrypts the document with optional owner and user passwords and a set of
+    permission flags. An empty user password lets the document open without a
+    prompt while still enforcing permissions; the owner password grants full
+    access.
+
+    :param str owner_password: password granting full permissions.
+    :param str user_password: password required to open the document.
+    :param int permissions: PDF permission bits (a signed 32-bit integer).
+    """
+    def __init__(self, owner_password='', user_password='', permissions=-4):
+        self.owner_password = owner_password
+        self.user_password = user_password
+        # Force the two reserved high bits required by the spec to 1, keep it a
+        # signed 32-bit value.
+        permissions |= 0xFFFFF0C0
+        permissions &= 0xFFFFFFFF
+        if permissions >= 0x80000000:
+            permissions -= 0x100000000
+        self.permissions = permissions
+        self.key_length = 16  # 128-bit
+        self.revision = 3
+        self.version = 2
+
+    def setup(self, id_value):
+        """Derive O, U and the file key from the document ID (Algorithms 2-5)."""
+        self.id = id_value
+        n = self.key_length
+        # Algorithm 3: owner password entry O.
+        owner_key = md5(_pad_password(self.owner_password or self.user_password))
+        owner_key = owner_key.digest()
+        for _ in range(50):
+            owner_key = md5(owner_key[:n]).digest()
+        owner_key = owner_key[:n]
+        owner = _pad_password(self.user_password)
+        for i in range(20):
+            owner = _rc4(bytes(b ^ i for b in owner_key), owner)
+        self.owner_entry = owner
+        # Algorithm 2: encryption key.
+        key_hash = md5()
+        key_hash.update(_pad_password(self.user_password))
+        key_hash.update(self.owner_entry)
+        key_hash.update(self.permissions.to_bytes(4, 'little', signed=True))
+        key_hash.update(self.id)
+        key = key_hash.digest()
+        for _ in range(50):
+            key = md5(key[:n]).digest()
+        self.key = key[:n]
+        # Algorithm 5: user password entry U.
+        user_hash = md5()
+        user_hash.update(_PASSWORD_PADDING)
+        user_hash.update(self.id)
+        user = _rc4(self.key, user_hash.digest())
+        for i in range(1, 20):
+            user = _rc4(bytes(b ^ i for b in self.key), user)
+        self.user_entry = user + b'\x00' * 16
+
+    def object_key(self, number, generation):
+        """Per-object RC4 key (Algorithm 1)."""
+        digest = md5()
+        digest.update(self.key)
+        digest.update(number.to_bytes(4, 'little')[:3])
+        digest.update(generation.to_bytes(4, 'little')[:2])
+        return digest.digest()[:min(self.key_length + 5, 16)]
+
+    def encrypt(self, number, generation, data):
+        return _rc4(self.object_key(number, generation), data)
+
+    def dictionary(self):
+        """The /Encrypt dictionary (never itself encrypted)."""
+        # O and U are binary; write them as hexadecimal strings so that no byte
+        # (e.g. an end-of-line marker, which is normalised inside a literal
+        # string) is altered on read.
+        encrypt = Dictionary({
+            'Filter': '/Standard',
+            'V': self.version,
+            'R': self.revision,
+            'Length': self.key_length * 8,
+            'O': b'<' + self.owner_entry.hex().encode() + b'>',
+            'U': b'<' + self.user_entry.hex().encode() + b'>',
+            'P': self.permissions,
+        })
+        encrypt.encryptable = False
+        return encrypt
+
+
+#: Active per-object encryptor during PDF.write (or None). Set by write() before
+#: serialising each top-level object so nested String/Stream data can encrypt.
+_encryption_context = None
 
 
 class PDF:
@@ -514,7 +650,8 @@ class PDF:
         self.current_position += len(content) + 1
         output.write(content + b'\n')
 
-    def write(self, output, version=b'1.7', identifier=False, compress=False):
+    def write(self, output, version=b'1.7', identifier=False, compress=False,
+              encryption=None):
         """Write PDF to output.
 
         :param output: Output stream.
@@ -525,8 +662,14 @@ class PDF:
           automatic identifier.
         :type identifier: :obj:`bytes` or :obj:`bool`
         :param bool compress: whether the PDF uses a compressed object stream.
+        :param encryption: an :class:`Encryption` instance to encrypt the
+          document, or :obj:`None` (the default) for no encryption. Encryption
+          forces the uncompressed object layout.
 
         """
+        global _encryption_context
+        _encryption_context = None
+
         # Convert version and identifier to bytes
         version = _to_bytes(version or b'1.7')  # Force 1.7 when None
         if identifier not in (False, True, None):
@@ -535,6 +678,22 @@ class PDF:
         # Add info object if needed
         if self.info:
             self.add_object(self.info)
+
+        # Set up encryption: object streams are incompatible with it, so the
+        # uncompressed object layout is forced. The document ID is needed up
+        # front to derive the encryption key, so it is computed here from the
+        # (still unencrypted) object data.
+        encrypt_object = None
+        if encryption is not None:
+            compress = False
+            data = b''.join(
+                obj.data for obj in self.objects if obj.free != 'f')
+            file_id = md5(data).digest()
+            if identifier not in (False, True, None):
+                file_id = md5(identifier).digest()
+            encryption.setup(file_id)
+            encrypt_object = encryption.dictionary()
+            self.add_object(encrypt_object)
 
         # Write header
         self.write_line(b'%PDF-' + version, output)
@@ -618,7 +777,14 @@ class PDF:
                 if object_.free == 'f':
                     continue
                 object_.offset = self.current_position
+                if encryption is not None and getattr(
+                        object_, 'encryptable', True):
+                    _encryption_context = partial(
+                        encryption.encrypt, object_.number, object_.generation)
+                else:
+                    _encryption_context = None
                 self.write_line(object_.indirect, output)
+            _encryption_context = None
 
             # Write cross-reference table
             self.xref_position = self.current_position
@@ -636,7 +802,15 @@ class PDF:
             self.write_line(b'/Root ' + self.catalog.reference, output)
             if self.info:
                 self.write_line(b'/Info ' + self.info.reference, output)
-            if identifier:
+            if encryption is not None:
+                # /Encrypt and /ID are never themselves encrypted; the /ID's
+                # first element is the value used to derive the encryption key.
+                self.write_line(
+                    b'/Encrypt ' + encrypt_object.reference, output)
+                id_string = b'<' + file_id.hex().encode() + b'>'
+                self.write_line(
+                    b'/ID [' + id_string + b' ' + id_string + b']', output)
+            elif identifier:
                 data = b''.join(
                     obj.data for obj in self.objects if obj.free != 'f')
                 data_hash = md5(data).hexdigest().encode()
